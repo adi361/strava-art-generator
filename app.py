@@ -1,3 +1,4 @@
+cat << 'EOF' > app.py
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
@@ -5,6 +6,9 @@ import gpxpy
 import gpxpy.gpx
 import requests
 import math
+import base64
+from io import BytesIO
+from PIL import Image
 
 # Konfigurasi halaman antarmuka
 st.set_page_config(page_title="Strava Art Generator", layout="wide")
@@ -45,7 +49,7 @@ def calculate_total_distance(coords):
         
     return total_distance
 
-# Fungsi untuk mengambil jalur jalan nyata atau garis lurus
+# Fungsi untuk mengambil rute jalan nyata atau garis lurus
 def update_route_geometry(start, waypoints, mode):
     full_points = [start] + waypoints
     if len(full_points) < 2:
@@ -54,10 +58,8 @@ def update_route_geometry(start, waypoints, mode):
     if mode == "Garis Lurus Bebas (Direct)":
         return full_points
     else:
-        # Mode Mengikuti Jalan (OSRM)
         coords_str = ";".join([f"{p[1]},{p[0]}" for p in full_points])
         url = f"http://router.project-osrm.org/route/v1/foot/{coords_str}?overview=full&geometries=geojson"
-        
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
@@ -67,7 +69,6 @@ def update_route_geometry(start, waypoints, mode):
                     return [[coord[1], coord[0]] for coord in geometry]
         except Exception:
             pass
-            
         return full_points
 
 # Panel Kontrol di Kolom Kanan
@@ -75,8 +76,27 @@ col_map, col_ctrl = st.columns([3, 1])
 
 with col_ctrl:
     st.subheader("Panel Kontrol Rute")
+
+    # Fitur Unggah Gambar Cetak Biru / Template Seni
+    st.write("🖼️ **Cetak Biru Seni (Gambar Template)**")
+    uploaded_file = st.file_uploader("Upload pola (T-Rex, hewan, dll):", type=["png", "jpg", "jpeg"])
     
-    # Pilihan Mode Pembuatan Garis
+    overlay_data_url = None
+    target_span_km = 5.0
+    overlay_opacity = 0.5
+
+    if uploaded_file is not None:
+        img = Image.open(uploaded_file)
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        img_b64 = base64.b64encode(buffered.getvalue()).decode()
+        overlay_data_url = f"data:image/png;base64,{img_b64}"
+        
+        target_span_km = st.slider("Ukuran Bentangan Gambar (KM)", min_value=1.0, max_value=15.0, value=5.0, step=0.5)
+        overlay_opacity = st.slider("Transparansi Gambar", min_value=0.1, max_value=1.0, value=0.5, step=0.1)
+
+    st.markdown("---")
+    
     route_mode = st.radio(
         "Pilih Mode Jalur:",
         ["Garis Lurus Bebas (Direct)", "Mengikuti Jalan (Routing)"],
@@ -110,7 +130,6 @@ with col_ctrl:
 
     st.markdown("---")
 
-    # Informasi Total Jarak Rute (KM)
     if len(st.session_state.route_coords) > 1:
         total_km = calculate_total_distance(st.session_state.route_coords)
         st.metric(label="📏 **Total Panjang Rute**", value=f"{total_km:.2f} km")
@@ -120,7 +139,6 @@ with col_ctrl:
     # Manajemen Checkpoint Rute
     if len(st.session_state.waypoints) > 0:
         st.write("📍 **Daftar Checkpoint Alur Rute:**")
-        
         points_to_remove = []
         for i, wp in enumerate(st.session_state.waypoints):
             col_info, col_del = st.columns([3, 1])
@@ -133,7 +151,6 @@ with col_ctrl:
         if points_to_remove:
             for index in sorted(points_to_remove, reverse=True):
                 st.session_state.waypoints.pop(index)
-            
             st.session_state.route_coords = update_route_geometry(st.session_state.start_point, st.session_state.waypoints, route_mode)
             st.rerun()
     else:
@@ -147,10 +164,8 @@ with col_ctrl:
         gpx.tracks.append(gpx_track)
         gpx_segment = gpxpy.gpx.GPXTrackSegment()
         gpx_track.segments.append(gpx_segment)
-        
         for coord in route_coords:
             gpx_segment.points.append(gpxpy.gpx.GPXTrackPoint(coord[0], coord[1]))
-            
         return gpx.to_xml()
 
     if len(st.session_state.route_coords) > 1:
@@ -165,7 +180,24 @@ with col_ctrl:
         st.warning("Buat minimal 1 checkpoint untuk mengaktifkan GPX.")
 
 with col_map:
-    m = folium.Map(location=st.session_state.start_point, zoom_start=15)
+    m = folium.Map(location=st.session_state.start_point, zoom_start=14)
+
+    if overlay_data_url:
+        delta_lat = (target_span_km / 111.0) / 2.0
+        delta_lon = (target_span_km / (111.0 * math.cos(math.radians(st.session_state.start_point[0])))) / 2.0
+        center_lat = st.session_state.start_point[0]
+        center_lon = st.session_state.start_point[1]
+        bounds = [
+            [center_lat - delta_lat, center_lon - delta_lon],
+            [center_lat + delta_lat, center_lon + delta_lon]
+        ]
+        folium.raster_layers.ImageOverlay(
+            image=overlay_data_url,
+            bounds=bounds,
+            opacity=overlay_opacity,
+            interactive=False,
+            cross_origin=False
+        ).add_to(m)
 
     start_color = "green" if st.session_state.start_locked else "orange"
     start_popup = "Titik Mulai (Terkunci)" if st.session_state.start_locked else "Titik Mulai (Geser dengan klik peta)"
@@ -186,14 +218,13 @@ with col_map:
             popup=f"Checkpoint {i+1}"
         ).add_to(m)
 
-    # Perbarui rute secara *real-time* jika mode diubah
     if st.session_state.start_locked and len(st.session_state.waypoints) > 0:
         st.session_state.route_coords = update_route_geometry(st.session_state.start_point, st.session_state.waypoints, route_mode)
 
     if len(st.session_state.route_coords) > 1:
         folium.PolyLine(st.session_state.route_coords, color="red", weight=4, opacity=0.8).add_to(m)
 
-    output = st_folium(m, width=700, height=550)
+    output = st_folium(m, width=700, height=580)
 
     if output and output.get("last_clicked"):
         clicked_lat = output["last_clicked"]["lat"]
